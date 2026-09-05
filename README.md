@@ -1,7 +1,8 @@
 # vit-pruning-attribution
 
-Code and experiment definitions for **"The alignment objective is not what
-decides training-free pruning of vision transformers."**
+Code and experiment definitions for **"Gram alignment objectives for
+training-free pruning of vision transformers: a spectral family and an
+attribution study."**
 
 Training-free one-shot structured pruning of a vision transformer ranks MLP
 hidden units and attention heads by the squared gradient of a teacher–student
@@ -120,8 +121,8 @@ The paper is under review; this entry will be updated when it appears.
 
 ```bibtex
 @misc{pham2026alignment,
-  title  = {The alignment objective is not what decides training-free pruning
-            of vision transformers},
+  title  = {Gram alignment objectives for training-free pruning of vision
+            transformers: a spectral family and an attribution study},
   author = {Pham, Van Tien},
   year   = {2026}
 }
