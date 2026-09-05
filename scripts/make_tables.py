@@ -1,8 +1,13 @@
 #!/usr/bin/env python
-"""Render the manuscript's tables from the aggregated summary.
+"""Render the manuscript's tables from the aggregated runs.
 
     uv run --no-sync python scripts/make_tables.py \
+        --measurements results/tables/measurements.csv \
         --summary results/tables/summary.csv --out redaction/tables
+
+The retention tables read the tidy per-seed rows rather than the summary,
+because retention has to be formed inside a calibration draw before it is
+averaged over draws; the summary has already collapsed the draws away.
 
 Each table body is written as its own ``.tex`` fragment and pulled in with
 \\input, so the numbers in the manuscript are never retyped and cannot drift
@@ -83,14 +88,17 @@ DATASET_LABELS = {
     "eurosat": "EuroSAT",
 }
 
+#: Percent parameter sparsity each budget induces, to the nearest point. The
+#: manuscript writes these in its column headers and its prose, so main()
+#: re-derives them from the runs and complains if the two have drifted apart.
 BUDGET_LABELS = {
     "s0": "0",
     "s05": "5",
     "s10": "10",
-    "s15": "13",
-    "s20": "18",
+    "s15": "16",
+    "s20": "20",
     "s30": "30",
-    "s40": "41",
+    "s40": "40",
 }
 
 
@@ -128,59 +136,79 @@ def select(
     return out
 
 
-def unpruned_baseline(rows: List[Row], backbone: str, metric: str) -> Dict[str, float]:
-    """The unpruned score per dataset, used to express results as retention.
-
-    Every objective shares the same unpruned network, so these are the same
-    numbers whichever row they are read from.
-    """
-    baseline: Dict[str, List[float]] = defaultdict(list)
-    for row in rows:
-        if row["backbone"] == backbone and row["metric"] == metric and row["budget"] == "s0":
-            baseline[row["dataset"]].append(float(row["mean"]))
-    return {dataset: statistics.fmean(values) for dataset, values in baseline.items()}
-
-
-def mean_over_datasets(
+def retention(
     rows: List[Row],
     datasets: Sequence[str],
-    baseline: Optional[Dict[str, float]] = None,
 ) -> Dict[Tuple[str, str], Tuple[float, float]]:
-    """Average a metric over datasets, keyed by (objective, budget).
+    """Retained fraction of the unpruned score, keyed by (objective, budget).
 
-    With ``baseline`` given, each dataset is first divided by its unpruned
-    score, so the average is the fraction of the original accuracy retained.
-    The five probes differ in difficulty by tens of points, and a raw average
-    over them would be dominated by whichever happens to be hardest.
+    Retention is formed *within* a calibration draw and only then aggregated
+    over draws. One draw produces one pruned network which is scored on all
+    five probes, so the per-probe deviations inside a draw are correlated;
+    pooling per-probe standard deviations as if the probes were independent
+    understates the spread, on these runs by up to a factor of two on the cells
+    with the most of it.
 
-    The per-dataset standard deviations are pooled in quadrature, which is the
-    spread of the mean across calibration draws under the assumption that the
-    draws are independent between datasets. It is reported so the reader can see
-    whether a margin exceeds the noise it is measured against.
+    Each probe is divided by its own unpruned score before averaging, because
+    the five differ in difficulty by tens of points and a raw average over them
+    would be dominated by whichever is hardest.
     """
-    grouped: Dict[Tuple[str, str], List[Tuple[float, float]]] = defaultdict(list)
+    baseline: Dict[Tuple[str, str], List[float]] = defaultdict(list)
     for row in rows:
-        dataset = row["dataset"]
-        if dataset not in datasets:
+        if row["budget"] == "s0" and row["dataset"] in datasets:
+            baseline[(row["dataset"], row["seed"])].append(float(row["value"]))
+    means = {key: statistics.fmean(v) for key, v in baseline.items()}
+
+    per_seed: Dict[Tuple[str, str], Dict[str, Dict[str, float]]] = defaultdict(
+        lambda: defaultdict(dict)
+    )
+    for row in rows:
+        if row["dataset"] not in datasets:
             continue
-        scale = 1.0
-        if baseline is not None:
-            if dataset not in baseline or baseline[dataset] <= 0:
-                continue
-            scale = 1.0 / baseline[dataset]
-        grouped[(row["objective"], row["budget"])].append(
-            (float(row["mean"]) * scale, float(row["std"]) * scale)
+        base = means.get((row["dataset"], row["seed"]))
+        if not base:
+            continue
+        per_seed[(row["objective"], row["budget"])][row["seed"]][row["dataset"]] = (
+            float(row["value"]) / base
         )
 
-    out = {}
-    for key, values in grouped.items():
-        if len(values) != len(datasets):
+    out: Dict[Tuple[str, str], Tuple[float, float]] = {}
+    for key, seeds in per_seed.items():
+        draws = [
+            statistics.fmean(d[name] for name in datasets)
+            for d in seeds.values()
+            if len(d) == len(datasets)
+        ]
+        if not draws:
             continue
-        means = [m for m, _ in values]
-        stds = [s for _, s in values]
-        pooled = (sum(s**2 for s in stds) ** 0.5) / len(stds)
-        out[key] = (statistics.fmean(means), pooled)
+        out[key] = (
+            statistics.fmean(draws),
+            statistics.stdev(draws) if len(draws) > 1 else 0.0,
+        )
     return out
+
+
+def leaders(
+    table: Dict[Tuple[str, str], Tuple[float, float]],
+    objectives: Sequence[str],
+    budget: str,
+    digits: int = 1,
+) -> set:
+    """Every objective tied for the best cell at the printed precision.
+
+    Bolding one of several cells that print the same number would assert a
+    lead the table does not show, and how often the objectives are
+    indistinguishable is the substance of these tables.
+    """
+    values = {
+        objective: table[(objective, budget)][0]
+        for objective in objectives
+        if (objective, budget) in table
+    }
+    if not values:
+        return set()
+    top = f"{100 * max(values.values()):.{digits}f}"
+    return {o for o, v in values.items() if f"{100 * v:.{digits}f}" == top}
 
 
 def fmt(value: Optional[Tuple[float, float]], bold: bool = False, digits: int = 1) -> str:
@@ -204,7 +232,6 @@ def objective_table(
     views: str = "two-crop",
     allocation: str = "global",
     highlight_from: int = 0,
-    relative: bool = True,
     labels: Optional[Dict[str, str]] = None,
 ) -> str:
     """Objectives down the rows, sparsity budgets across the columns."""
@@ -217,23 +244,17 @@ def objective_table(
         views=views,
         allocation=allocation,
     )
-    baseline = unpruned_baseline(rows, backbone, metric) if relative else None
-    table = mean_over_datasets(subset, datasets, baseline)
+    table = retention(subset, datasets)
 
-    best: Dict[str, str] = {}
+    best: Dict[str, set] = {}
     for budget in budgets[highlight_from:]:
-        candidates = [
-            (table[(objective, budget)][0], objective)
-            for objective in objectives
-            if (objective, budget) in table
-        ]
-        if candidates:
-            best[budget] = max(candidates)[1]
+        best[budget] = leaders(table, objectives, budget)
 
     lines = []
     for objective in objectives:
         cells = [
-            fmt(table.get((objective, budget)), bold=best.get(budget) == objective)
+            fmt(table.get((objective, budget)),
+                bold=objective in best.get(budget, ()))
             for budget in budgets
         ]
         lines.append(f"{labels.get(objective, objective)} & " + " & ".join(cells) + r" \\")
@@ -248,14 +269,12 @@ def component_table(
     datasets: Sequence[str],
     backbone: str = "dinov2-vitb14",
     metric: str = "linear",
-    relative: bool = True,
 ) -> str:
     """One row per (variant, objective), for the view/allocation/corpus studies.
 
     ``variants`` are ``(label, field, value)`` triples naming the pipeline
     component being varied.
     """
-    baseline = unpruned_baseline(rows, backbone, metric) if relative else None
     lines = []
     for label, field, value in variants:
         conditions = {
@@ -266,7 +285,7 @@ def component_table(
             "allocation": "global",
         }
         conditions[field] = value
-        table = mean_over_datasets(select(rows, **conditions), datasets, baseline)
+        table = retention(select(rows, **conditions), datasets)
 
         cells_by_objective = []
         for objective in objectives:
@@ -284,7 +303,6 @@ def multi_backbone_table(
     budgets: Sequence[str],
     datasets: Sequence[str],
     metric: str = "linear",
-    relative: bool = True,
     labels: Optional[Dict[str, str]] = None,
 ) -> str:
     """The main comparison: objectives down the rows, arm x budget across.
@@ -301,19 +319,12 @@ def multi_backbone_table(
             rows, backbone=backbone, metric=metric, calibration="imagenet",
             views="two-crop", allocation=allocation,
         )
-        baseline = unpruned_baseline(rows, backbone, metric) if relative else None
-        tables[arm] = mean_over_datasets(subset, datasets, baseline)
+        tables[arm] = retention(subset, datasets)
 
     best = {}
     for arm in arms:
         for budget in budgets:
-            candidates = [
-                (tables[arm][(o, budget)][0], o)
-                for o in objectives
-                if (o, budget) in tables[arm]
-            ]
-            if candidates:
-                best[(arm, budget)] = max(candidates)[1]
+            best[(arm, budget)] = leaders(tables[arm], objectives, budget)
 
     labels = COMPACT_LABELS if labels is None else labels
     lines = []
@@ -323,7 +334,7 @@ def multi_backbone_table(
             for budget in budgets:
                 cells.append(
                     fmt(tables[arm].get((objective, budget)),
-                        bold=best.get((arm, budget)) == objective)
+                        bold=objective in best.get((arm, budget), ()))
                 )
         lines.append(
             f"{labels.get(objective, objective)} & " + " & ".join(cells) + r" \\"
@@ -338,7 +349,6 @@ def alpha_rank_table(
     datasets: Sequence[str],
     backbone: str = "dinov2-vitb14",
     metric: str = "linear",
-    relative: bool = True,
 ) -> str:
     """The (exponent, rank) plane: rows are alpha, column groups are K.
 
@@ -349,8 +359,7 @@ def alpha_rank_table(
         rows, backbone=backbone, metric=metric, calibration="imagenet",
         views="two-crop", allocation="global",
     )
-    baseline = unpruned_baseline(rows, backbone, metric) if relative else None
-    table = mean_over_datasets(subset, datasets, baseline)
+    table = retention(subset, datasets)
 
     lines = []
     for alpha in alphas:  # noqa: B007
@@ -435,29 +444,24 @@ def cost_table(rows: List[Row], objectives: Sequence[str], backbone: str) -> str
     return "\n".join(lines)
 
 
-def sparsity_row(rows: List[Row], backbone: str, budgets: Sequence[str]) -> str:
-    """Measured parameter and FLOP sparsity for each budget."""
-    from collections import defaultdict as dd
-
-    # parameter_sparsity is carried on the tidy rows, not the summary, so read
-    # it back from any measurement row for the budget.
-    return " & ".join(BUDGET_LABELS[b] for b in budgets)
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--summary", default="results/tables/summary.csv")
+    parser.add_argument(
+        "--measurements", default="results/tables/measurements.csv",
+        help="per-seed rows; the retention tables need them to form retention "
+             "within a draw before aggregating over draws",
+    )
+    parser.add_argument(
+        "--summary", default="results/tables/summary.csv",
+        help="seed-aggregated rows, used for the quantities that carry no "
+             "per-dataset breakdown",
+    )
     parser.add_argument("--out", default="redaction/tables")
     parser.add_argument("--metric", default="linear", choices=["linear", "knn"])
-    parser.add_argument(
-        "--absolute",
-        action="store_true",
-        help="report raw accuracy instead of the fraction of the unpruned score",
-    )
     args = parser.parse_args()
-    relative = not args.absolute
 
-    rows = load(Path(args.summary))
+    rows = load(Path(args.measurements))
+    summary = load(Path(args.summary))
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -480,7 +484,7 @@ def main() -> int:
          ("dinov2-vitb14", "block-normalised"),
          ("dino-vitb16", "block-normalised")],
         main_objectives, ["s10", "s20", "s30"], datasets,
-        metric=args.metric, relative=relative,
+        metric=args.metric,
     )
     if body.strip():
         write_body(out / "objectives.tex", body)
@@ -491,7 +495,7 @@ def main() -> int:
     for backbone in BACKBONE_LABELS:
         body = objective_table(
             rows, backbone, main_objectives, budgets, datasets,
-            metric=args.metric, highlight_from=1, relative=relative,
+            metric=args.metric, highlight_from=1,
         )
         if body.strip():
             path = out / f"objectives-{backbone}.tex"
@@ -500,7 +504,7 @@ def main() -> int:
 
     body = alpha_rank_table(
         rows, [0.0, 0.5, 1.0, 2.0], ["s10", "s20"], datasets,
-        metric=args.metric, relative=relative,
+        metric=args.metric,
     )
     if body.strip():
         write_body(out / "alpha-rank.tex", body)
@@ -537,7 +541,7 @@ def main() -> int:
     for heading, variants in groups:
         block = component_table(
             rows, variant_objectives, variants, short_budgets, datasets,
-            metric=args.metric, relative=relative,
+            metric=args.metric,
         )
         if block.strip():
             blocks.append(f"{heading}" + " & --" * ncols + r" \\" + "\n" + block)
@@ -545,16 +549,26 @@ def main() -> int:
         write_body(out / "components.tex", "\n".join(blocks))
         written.append(out / "components.tex")
 
-    body = dense_table(rows, main_objectives, ["s10", "s20"])
+    body = dense_table(summary, main_objectives, ["s10", "s20"])
     if body.strip():
         write_body(out / "dense.tex", body)
         written.append(out / "dense.tex")
 
-    body = cost_table(rows, ["cosine", "cutvit", "gram-a0.5", "gram-a1", "gram-a2"],
+    body = cost_table(summary, ["cosine", "cutvit", "gram-a0.5", "gram-a1", "gram-a2"],
                       "dinov2-vitb14")
     if body.strip():
         write_body(out / "cost.tex", body)
         written.append(out / "cost.tex")
+
+    for budget, label in BUDGET_LABELS.items():
+        measured = [
+            float(row["parameter_sparsity"])
+            for row in rows
+            if row["budget"] == budget and row["parameter_sparsity"]
+        ]
+        if measured and f"{100 * statistics.fmean(measured):.0f}" != label:
+            print(f"warning: {budget} is labelled {label}% but measures "
+                  f"{100 * statistics.fmean(measured):.1f}%")
 
     for path in written:
         print(f"wrote {path}")

@@ -52,6 +52,16 @@ SERIES = [
     ("gram-a2", r"Spectral $\alpha$=2", "#ff7f0e", "--", "X"),
 ]
 
+#: Legend text for the two-panel figure, where the column measure is 3.0in and
+#: a longer label would force the legend below 6pt.
+FIGURE_LABELS = {
+    "cutvit": r"Subspace ($\alpha$=0)",
+}
+
+#: The single-column measure of the journal class, in inches: drawing at
+#: exactly this width keeps 6pt legend text at 6pt in the float.
+COLUMN_WIDTH = 216.24 / 72.27
+
 BACKBONE_LABELS = {
     "dinov2-vitb14": "DINOv2 ViT-B/14",
     "dino-vitb16": "DINO ViT-B/16",
@@ -174,15 +184,15 @@ def figure_structure(runs, datasets, out: Path, metric: str = "linear") -> Optio
     Left: how many MLP units each block keeps under a raw global ranking. Right:
     what removing the cross-block scale is worth, objective by objective.
     """
-    profile_objectives = [
-        ("random", "random", "#9e9e9e"),
-        ("cosine", "pointwise cosine", "#1f77b4"),
-        ("cutvit", "subspace", "#d62728"),
-        ("gram-a1", r"spectral $\alpha$=1", "#2ca02c"),
-    ]
+    # The left panel draws four of the seven series; the shared legend under
+    # the figure names all of them, so the two panels can be read against each
+    # other without a colour appearing that nothing explains.
+    profile_objectives = ["random", "cosine", "cutvit", "gram-a1"]
+    style = {name: (FIGURE_LABELS.get(name, label), colour, dash, marker)
+             for name, label, colour, dash, marker in SERIES}
 
     profiles = {}
-    for objective, label, colour in profile_objectives:
+    for objective in profile_objectives:
         widths = [
             run["budgets"]["s20"]["widths"]["hidden_dims"]
             for run in matching(runs, backbone="dinov2-vitb14", objective=objective,
@@ -191,41 +201,54 @@ def figure_structure(runs, datasets, out: Path, metric: str = "linear") -> Optio
             if "s20" in run.get("budgets", {})
         ]
         if widths:
-            profiles[objective] = (label, colour, [statistics.fmean(c) for c in zip(*widths)])
+            profiles[objective] = [statistics.fmean(c) for c in zip(*widths)]
 
     paired = []
-    for objective, label, colour, _style, _marker in SERIES:
+    for objective, label, colour, _dash, _marker in SERIES:
         g = _retained(runs, "dinov2-vitb14", objective, "global", datasets, "s20", metric)
         n = _retained(runs, "dinov2-vitb14", objective, "block-normalised", datasets,
                       "s20", metric)
         if g is not None and n is not None:
-            paired.append((objective, label, colour, g, n))
+            paired.append((objective, g, n))
 
     if not profiles and not paired:
         return None
 
-    fig, axes = plt.subplots(1, 2, figsize=(3.4, 1.38))
-    fig.subplots_adjust(wspace=0.55)
+    fig, axes = plt.subplots(1, 2, figsize=(COLUMN_WIDTH, 1.58))
+    fig.subplots_adjust(wspace=0.58, bottom=0.47, top=0.97)
 
-    for objective, (label, colour, profile) in profiles.items():
-        axes[0].plot(range(1, len(profile) + 1), profile, marker="o", color=colour,
-                     label=label)
+    handles = {}
+    # The alignment profiles very nearly coincide, which is the point of the
+    # panel; distinct dashes and markers keep the hidden one legible under it.
+    for objective, profile in profiles.items():
+        label, colour, dash, marker = style[objective]
+        line, = axes[0].plot(range(1, len(profile) + 1), profile, marker=marker,
+                             linestyle=dash, color=colour, label=label,
+                             markerfacecolor="none", markeredgewidth=0.7)
+        handles[objective] = line
     axes[0].set_xlabel("block")
     axes[0].set_ylabel("MLP units kept")
     axes[0].grid(alpha=0.25, linewidth=0.4)
-    axes[0].legend(frameon=False, fontsize=5, loc="lower right")
 
     if paired:
-        lo = min(min(g, n) for _, _, _, g, n in paired) - 3
-        hi = max(max(g, n) for _, _, _, g, n in paired) + 3
+        lo = min(min(g, n) for _, g, n in paired) - 3
+        hi = max(max(g, n) for _, g, n in paired) + 3
         axes[1].plot([lo, hi], [lo, hi], color="#999999", linewidth=0.6, linestyle="--")
-        for objective, label, colour, g, n in paired:
-            axes[1].scatter([g], [n], color=colour, s=9, zorder=3)
+        for objective, g, n in paired:
+            label, colour, dash, marker = style[objective]
+            point = axes[1].scatter([g], [n], color=colour, marker=marker, s=14,
+                                    zorder=3, label=label)
+            handles.setdefault(objective, point)
         axes[1].set_xlabel("global ranking (%)")
         axes[1].set_ylabel("block-normalised (%)")
         axes[1].grid(alpha=0.25, linewidth=0.4)
     else:
         axes[1].set_axis_off()
+
+    ordered = [handles[name] for name, *_ in SERIES if name in handles]
+    fig.legend(ordered, [h.get_label() for h in ordered], loc="lower center",
+               ncol=3, frameon=False, fontsize=6, handlelength=1.6,
+               columnspacing=0.8, handletextpad=0.4, bbox_to_anchor=(0.5, 0.0))
 
     path = out / "structure.pdf"
     fig.savefig(path)
