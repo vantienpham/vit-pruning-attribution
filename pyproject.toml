@@ -1,0 +1,41 @@
+[project]
+name = "model-pruning"
+version = "0.1.0"
+description = "Spectral analysis of Gram alignment objectives for training-free structured pruning of vision transformers"
+requires-python = ">=3.10,<3.13"
+
+dependencies = [
+    # torch is capped below 2.7 deliberately: an unconstrained resolve pulls a
+    # +cu130 build, which has no sm_61/sm_70 cubin and needs a driver newer than
+    # the one the Pascal/Volta partitions carry. See cluster.local.md.
+    "torch<2.7",
+    "torchvision<0.22",
+    "timm>=1.0.9",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "scikit-learn>=1.4",
+    "pillow>=10.0",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    # Figures are rendered on the laptop from the pulled summary CSV, so this is
+    # not needed inside a job.
+    "matplotlib>=3.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: takes more than a few seconds",
+    "gpu: requires a CUDA device",
+]

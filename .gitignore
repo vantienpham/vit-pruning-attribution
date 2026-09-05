@@ -1,0 +1,26 @@
+# Results live on the cluster and are pulled back as small JSON sidecars;
+# never commit the tensors or the logs.
+out/
+logs/
+results/
+*.pt
+*.ckpt
+
+# Provenance stamp written by slurm/sync.sh at transfer time.
+.git_commit
+
+# Generated table fragments and figures. Regenerate with scripts/make_*.py
+# rather than editing or committing them.
+redaction/tables/
+redaction/figures/
+paper/tables/
+paper/figures/
+
+# Environments and caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.uv-cache/
