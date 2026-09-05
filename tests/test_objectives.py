@@ -128,7 +128,32 @@ def test_losses_vanish_on_identical_features(features):
     for alpha, k in [(0.0, 8), (0.5, None), (1.0, None), (2.0, None)]:
         assert abs(float(spectral_alignment_loss(g, g, alpha=alpha, k=k))) < 1e-8
     assert abs(float(pointwise_cosine_loss(features, features))) < 1e-6
+    # k = 32 is at least the rank here, which is the only case in which the
+    # residual term joins them; see the test below.
     assert float(residual_loss(features.double(), g, k=32, axis="spatial")) < 1e-8
+
+
+def test_residual_does_not_vanish_on_identical_features(features):
+    """The residual term is the exception to the degeneracy proposition.
+
+    At F_p = F_t it measures the teacher's own energy outside its leading K
+    directions, so it is zero only when K reaches the rank. Truncated below
+    that it keeps a gradient where every other objective here has none, which
+    is why the identical-views control behaves differently for the subspace
+    objective than for the rest.
+    """
+    x = features.double()
+    g = gram(x, "spatial").double()
+    spectrum = torch.linalg.svdvals(x)
+    for k in (4, 8, 16):
+        value = float(residual_loss(x, g, k=k, axis="spatial"))
+        tail = (spectrum[:, k:] ** 2).sum(1) / (spectrum**2).sum(1)
+        assert value > 0.0, k
+        assert abs(value - float(tail.mean())) < 1e-10, k
+
+    # Truncating below the signal rank leaves a large fraction behind, which is
+    # the regime a rank of 192 puts a transformer Gram matrix in.
+    assert float(residual_loss(x, g, k=4, axis="spatial")) > 0.1
 
 
 def test_losses_increase_with_perturbation(features):

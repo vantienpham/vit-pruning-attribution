@@ -30,14 +30,20 @@ protocol** — move the results by up to 25 points. Under the ranking published
 methods use, every gradient-based objective falls below random pruning past 18%
 sparsity.
 
-## Two facts worth knowing before building on this
+## Three facts worth knowing before building on this
 
 1. **The calibration pass needs two different views.** The unpruned network is an
    exact global minimum of every objective in the family, so a pass in which
    teacher and student read the same pixels has a gradient of *exactly* zero and
    yields a ranking made of floating-point residue. `--views` selects how the two
    views are made to differ; `identical` is retained as a control.
-2. **Fractional exponents return NaN gradients through an eigendecomposition.**
+2. **The residual constraint is the exception to that.** At `F_p = F_t` it
+   evaluates to `sum_{i>K} σ_i² / sum_i σ_i²`, the teacher's own energy outside
+   its leading `K` directions, which is zero only when `K` reaches the feature
+   rank. With 256 patch tokens and `K = 192` it is not, so the subspace
+   objective keeps a gradient in exactly the configuration where every other
+   objective here has none, and its identical-views ranking is not noise.
+3. **Fractional exponents return NaN gradients through an eigendecomposition.**
    A transformer Gram matrix has an effective rank of a few dozen out of several
    hundred, so the `1/(σ_i − σ_j)` terms in the backward pass are enormous. The
    forward pass looks ordinary and `argsort` places NaN arbitrarily, so the
@@ -55,7 +61,8 @@ uv run --no-sync python -m pytest tests/ -q     # ~3 s, CPU only
 The suite checks the claims the paper proves: that the `α = 0` member equals the
 chordal subspace distance, that every member is basis-invariant, that the two
 Gram entropies coincide (so the spectral-entropy axis weighting is the constant
-½), and that identical views give a zero gradient.
+½), that identical views give a zero gradient, and that the residual term is the
+one exception to that (see below).
 
 One configuration, every seed and every budget:
 
